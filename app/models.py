@@ -7,3 +7,8 @@ class Task(BaseModel):
     title: str
     description: Optional[str] = None
     completed: bool = False
+
+
+class User(BaseModel):
+    username: str
+    password: str
