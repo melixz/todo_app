@@ -1,5 +1,8 @@
 from fastapi import FastAPI
-from .routers import router
+from app.routers import router
+from db.database import engine, Base
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="ToDo Application",

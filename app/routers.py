@@ -1,77 +1,92 @@
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from typing import List
-from .models import Task, User
-from .utils import find_task, get_password_hash, verify_password, create_access_token
+from sqlalchemy.orm import Session
+from . import models
+from db import schemas
+from db.database import SessionLocal
+from .utils import get_password_hash, verify_password, create_access_token
 from datetime import timedelta
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 router = APIRouter()
 
-tasks: List[Task] = []
-users_db = {}
+
+# Dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 
-@router.get("/", tags=["Root"], summary="Приветственное сообщение")
-def read_root():
-    return {"message": "Welcome to the ToDo App!"}
+@router.post("/tasks/", response_model=schemas.Task, tags=["Tasks"], summary="Создание новой задачи")
+def create_task(task: schemas.TaskCreate, db: Session = Depends(get_db)):
+    db_task = models.Task(**task.dict())
+    db.add(db_task)
+    db.commit()
+    db.refresh(db_task)
+    return db_task
 
 
-@router.post("/tasks/", response_model=Task, tags=["Tasks"], summary="Создание новой задачи")
-def create_task(task: Task):
-    tasks.append(task)
-    return task
-
-
-@router.get("/tasks/", response_model=List[Task], tags=["Tasks"], summary="Получение списка всех задач")
-def get_tasks():
+@router.get("/tasks/", response_model=list[schemas.Task], tags=["Tasks"], summary="Получение списка всех задач")
+def get_tasks(db: Session = Depends(get_db)):
+    tasks = db.query(models.Task).all()
     return tasks
 
 
-@router.put("/tasks/{task_id}", response_model=Task, tags=["Tasks"], summary="Обновление задачи по ID")
-def update_task(task_id: int, updated_task: Task):
-    task = find_task(tasks, task_id)
-    if task is None:
+@router.put("/tasks/{task_id}", response_model=schemas.Task, tags=["Tasks"], summary="Обновление задачи по ID")
+def update_task(task_id: int, updated_task: schemas.TaskCreate, db: Session = Depends(get_db)):
+    db_task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if db_task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    task.title = updated_task.title
-    task.description = updated_task.description
-    task.completed = updated_task.completed
-    return task
+    for var, value in vars(updated_task).items():
+        setattr(db_task, var, value) if value else None
+
+    db.add(db_task)
+    db.commit()
+    db.refresh(db_task)
+    return db_task
 
 
-@router.delete("/tasks/{task_id}", response_model=Task, tags=["Tasks"], summary="Удаление задачи по ID")
-def delete_task(task_id: int):
-    task = find_task(tasks, task_id)
-    if task is None:
+@router.delete("/tasks/{task_id}", response_model=schemas.Task, tags=["Tasks"], summary="Удаление задачи по ID")
+def delete_task(task_id: int, db: Session = Depends(get_db)):
+    db_task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if db_task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    tasks.remove(task)
-    return task
+    db.delete(db_task)
+    db.commit()
+    return db_task
 
 
 @router.post("/register", tags=["Auth"], summary="Регистрация нового пользователя")
-def register_user(user: User):
-    if user.username in users_db:
+def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.username == user.username).first()
+    if db_user:
         raise HTTPException(status_code=400, detail="Username already registered")
     hashed_password = get_password_hash(user.password)
-    users_db[user.username] = {"username": user.username, "password": hashed_password}
+    db_user = models.User(username=user.username, password=hashed_password)
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
     return {"message": "User registered successfully"}
 
 
 @router.post("/token", tags=["Auth"], summary="Получение токена доступа")
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    user_dict = users_db.get(form_data.username)
-    if not user_dict:
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.username == form_data.username).first()
+    if not db_user:
         raise HTTPException(status_code=400, detail="Incorrect username or password")
-    hashed_password = user_dict["password"]
-    if not verify_password(form_data.password, hashed_password):
+    if not verify_password(form_data.password, db_user.password):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": form_data.username}, expires_delta=access_token_expires)
+    access_token = create_access_token(data={"sub": db_user.username}, expires_delta=access_token_expires)
     return {"access_token": access_token, "token_type": "bearer"}
 
 
